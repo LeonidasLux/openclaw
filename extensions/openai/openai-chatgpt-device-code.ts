@@ -299,11 +299,11 @@ async function pollOpenAICodexDeviceCode(params: {
       });
     } catch (error) {
       rethrowIfDeviceCodeCallerAborted(params.signal, error);
-      // A stalled poll is transient; keep the overall 15-minute authorization deadline.
-      if (isDeviceCodeOperationTimeoutError(error)) {
-        continue;
-      }
-      throw error;
+      // Any transient network error (DNS resolution failure, socket hangup,
+      // timeout, SSRF guard interrupt, etc.) should not abort the 15-minute
+      // authorization flow. The deadline above bounds retry and prevents
+      // infinite loops.
+      continue;
     }
 
     if (result.ok) {
