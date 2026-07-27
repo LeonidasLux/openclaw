@@ -121,6 +121,20 @@ function isDeviceCodeOperationTimeoutError(error: unknown): boolean {
   return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
 }
 
+function isDeviceCodeTransientTransportError(error: unknown): boolean {
+  // Timeout/abort errors from the fetch timeout mechanism.
+  if (isDeviceCodeOperationTimeoutError(error)) {
+    return true;
+  }
+  // TypeError from fetch (DNS resolution failure, socket hangup, connection
+  // refused, TLS failure, etc.) — these are transient network conditions that
+  // may resolve on retry within the 15-minute authorization deadline.
+  if (error instanceof TypeError) {
+    return true;
+  }
+  return false;
+}
+
 function rethrowIfDeviceCodeCallerAborted(signal: AbortSignal | undefined, error: unknown): void {
   if (signal?.aborted) {
     throw signal.reason instanceof Error ? signal.reason : error;
@@ -299,8 +313,11 @@ async function pollOpenAICodexDeviceCode(params: {
       });
     } catch (error) {
       rethrowIfDeviceCodeCallerAborted(params.signal, error);
-      // A stalled poll is transient; keep the overall 15-minute authorization deadline.
-      if (isDeviceCodeOperationTimeoutError(error)) {
+      // Transient transport errors (timeout, DNS resolution failure, socket
+      // hangup, connection refused, etc.) should not abort the 15-minute
+      // authorization flow. The deadline above bounds retry. Terminal provider,
+      // protocol, or programming errors still propagate immediately.
+      if (isDeviceCodeTransientTransportError(error)) {
         continue;
       }
       throw error;

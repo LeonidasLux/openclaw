@@ -337,6 +337,82 @@ describe("loginOpenAICodexDeviceCode", () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
+  it("retries a network TypeError during authorization poll within the overall deadline", async () => {
+    vi.useFakeTimers();
+    const accessToken = createJwt({
+      exp: Math.floor(Date.now() / 1000) + 600,
+    });
+    let pollAttempts = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/api/accounts/deviceauth/usercode")) {
+        return createJsonResponse({
+          device_auth_id: "device-auth-123",
+          user_code: "CODE-12345",
+          interval: "0",
+        });
+      }
+      if (url.endsWith("/api/accounts/deviceauth/token")) {
+        pollAttempts += 1;
+        if (pollAttempts === 1) {
+          throw new TypeError("fetch failed (DNS resolution failure)");
+        }
+        return createJsonResponse({
+          authorization_code: "authorization-code-123",
+          code_verifier: "code-verifier-123",
+        });
+      }
+      if (url.endsWith("/oauth/token")) {
+        return createJsonResponse({
+          access_token: accessToken,
+          refresh_token: "refresh-token-123",
+          expires_in: 600,
+        });
+      }
+      throw new Error(`unexpected OpenAI device-code URL: ${url}`);
+    });
+
+    const login = loginOpenAICodexDeviceCode({
+      fetchFn: fetchMock,
+      onVerification: async () => {},
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const resolved = expect(login).resolves.toMatchObject({ refresh: "refresh-token-123" });
+    await vi.advanceTimersByTimeAsync(30_000);
+    await resolved;
+    expect(pollAttempts).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("propagates a terminal polling error immediately instead of retrying", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/api/accounts/deviceauth/usercode")) {
+        return createJsonResponse({
+          device_auth_id: "device-auth-123",
+          user_code: "CODE-12345",
+          interval: "0",
+        });
+      }
+      if (url.endsWith("/api/accounts/deviceauth/token")) {
+        throw new Error("unexpected provider protocol error");
+      }
+      throw new Error(`unexpected OpenAI device-code URL: ${url}`);
+    });
+
+    const login = loginOpenAICodexDeviceCode({
+      fetchFn: fetchMock,
+      onVerification: async () => {},
+    });
+    login.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+
+    await expect(login).rejects.toThrow("unexpected provider protocol error");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("aborts device-code polling without another request", async () => {
     vi.useFakeTimers();
     const controller = new AbortController();
